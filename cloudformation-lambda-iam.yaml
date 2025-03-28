@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation template to create an IAM user, attach a policy, and generate access keys only if the user does not already exist."
+
+Resources:
+  ManageIAMUserFunction:
+    Type: "AWS::Lambda::Function"
+    Properties:
+      Handler: "index.handler"
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import boto3
+          import json
+          import cfnresponse
+
+          def handler(event, context):
+              iam = boto3.client('iam')
+              responseData = {'Status': 'Success', 'Message': '','AccessKeyId': 'N/A', 'SecretAccessKey': 'N/A'}
+
+              try:
+                  if event['RequestType'] == 'Create':
+                      username = 'devops-engineer'
+                      policy_name = 'devops-policy'
+
+                      try:
+                          # Check if user exists
+                          iam.get_user(UserName=username)
+                          responseData['Message'] = 'default-connector. Setup Failed'
+                      except iam.exceptions.NoSuchEntityException:
+                          # User doesn't exist, create it
+                          iam.create_user(UserName=username)
+                          responseData['Message'] = 'Default access connector created successfully.'
+
+                          # Attach policy
+                          policy_document = {
+                              "Version": "2012-10-17",
+                              "Statement": [
+                                  {
+                                      "Effect": "Allow",
+                                      "Action": [
+                                          "s3:ListBucket",
+                                          "s3:GetObject",
+                                          "s3:CreateBucket",
+                                          "s3:GetBucketLocation",
+                                          "iam:Get*",
+                                          "iam:List*",
+                                          "iam:CreateUser",
+                                          "iam:CreatePolicy",
+                                          "iam:AttachUserPolicy",
+                                          "iam:PutUserPolicy",
+                                          "iam:CreateAccessKey"
+                                      ],
+                                      "Resource": "*"
+                                  }
+                              ]
+                          }
+                          iam.put_user_policy(
+                              UserName=username,
+                              PolicyName=policy_name,
+                              PolicyDocument=json.dumps(policy_document)
+                          )
+
+                          # Create access key for the user
+                          access_key = iam.create_access_key(UserName=username)
+                          responseData['AccessKeyId'] = access_key['AccessKey']['AccessKeyId']
+                          responseData['SecretAccessKey'] = access_key['AccessKey']['SecretAccessKey']
+
+                  cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData)
+              except Exception as e:
+                  responseData['Message'] = str(e)
+                  cfnresponse.send(event, context, cfnresponse.FAILED, responseData)
+      Runtime: "python3.9"
+      Timeout: 30
+
+  LambdaExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: "sts:AssumeRole"
+      ManagedPolicyArns:
+        - "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+      Policies:
+        - PolicyName: "IAMUserManagement"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "iam:GetUser"
+                  - "iam:CreateUser"
+                  - "iam:PutUserPolicy"
+                  - "iam:CreateAccessKey"
+                Resource: "*"
+
+  ManageIAMUser:
+    Type: "Custom::ManageIAMUser"
+    Properties:
+      ServiceToken: !GetAtt ManageIAMUserFunction.Arn
+
+Outputs:
+  AccountID:
+    Description: "AWS Account ID"
+    Value: !Sub "${AWS::AccountId}"
+
+  AccessKeyId:
+    Description: "Access Key"
+    Value: !GetAtt ManageIAMUser.AccessKeyId
+
+  SecretAccessKey:
+    Description: "Secret Key"
+    Value: !GetAtt ManageIAMUser.SecretAccessKey
+
+  DeploymentStatus:
+    Description: "Deployment Status"
+    Value: !GetAtt ManageIAMUser.Message
